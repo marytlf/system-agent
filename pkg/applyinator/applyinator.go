@@ -108,9 +108,12 @@ func (a *Applyinator) Apply(ctx context.Context, input ApplyInput) (ApplyOutput,
 		restartPendingInterlockFilePath := filepath.Join(a.interlockDir, restartPendingInterlockFile)
 		applyinatorActiveInterlockFilePath := filepath.Join(a.interlockDir, applyinatorActiveInterlockFile)
 		// First off, remove check and remove the active interlock as the applyinator is not actually active
-		if _, err := os.Stat(applyinatorActiveInterlockFile); err == nil {
-			err = os.Remove(applyinatorActiveInterlockFile)
-			if err != nil {
+		if contents, err := os.ReadFile(applyinatorActiveInterlockFilePath); err == nil {
+			if owner, ok := parseInterlockOwner(contents); ok && owner.PID != os.Getpid() && owner.isAlive() {
+				return output, fmt.Errorf("another system-agent process (pid %d) is applying a plan; refusing to apply concurrently", owner.PID)
+			}
+			logrus.Warnf("[Applyinator] removing stale active interlock file %s left by a previous agent", applyinatorActiveInterlockFilePath)
+			if err := os.Remove(applyinatorActiveInterlockFilePath); err != nil && !os.IsNotExist(err) {
 				logrus.Errorf("unable to remove applyinator active interlock file %s: %v", applyinatorActiveInterlockFilePath, err)
 			}
 		}

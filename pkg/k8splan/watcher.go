@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -64,8 +63,9 @@ const (
 	// PlanKey is the Secret data key for the plan payload.
 	PlanKey = "plan"
 
-	enqueueAfterDuration  = "5s"
-	cooldownTimerDuration = "30s"
+	enqueueAfterDuration     = "5s"
+	cooldownTimerDuration    = "30s"
+	maxConsecutiveStaleReads = 3
 )
 
 func Watch(ctx context.Context, applyinator applyinator.Applyinator, connInfo config.ConnectionInfo, strictVerify bool) {
@@ -81,6 +81,7 @@ type watcher struct {
 	connInfo                   config.ConnectionInfo
 	applyinator                applyinator.Applyinator
 	lastAppliedResourceVersion string
+	staleReadCount             int
 	secretUID                  string
 }
 
@@ -195,10 +196,32 @@ func (w *watcher) start(ctx context.Context, strictVerify bool) {
 			logrus.Infof("[K8s] received secret with new UID (%s, previously %s); secret was recreated — resetting agent state", secret.UID, w.secretUID)
 			w.secretUID = ""
 			w.lastAppliedResourceVersion = ""
+			w.staleReadCount = 0
 			hasRunOnce = false
 		case rvIsOlder:
-			logrus.Errorf("[K8s] received secret to process that was older than the last secret operated on. (%s vs %s)", secret.ResourceVersion, w.lastAppliedResourceVersion)
-			return secret, errors.New("secret received was too old")
+			logrus.Warnf("[K8s] received secret with resource version %s, older than the last applied (%s); confirming with a live read", secret.ResourceVersion, w.lastAppliedResourceVersion)
+			live, getErr := core.Secret().Get(w.connInfo.Namespace, w.connInfo.SecretName, metav1.GetOptions{})
+			switch {
+			case getErr != nil:
+				logrus.Warnf("[K8s] unable to confirm stale secret with a live read: %v; retrying in %s", getErr, probePeriod)
+				core.Secret().EnqueueAfter(w.connInfo.Namespace, w.connInfo.SecretName, probePeriod)
+				return secret, nil
+			case toInt(live.ResourceVersion) >= toInt(w.lastAppliedResourceVersion):
+				logrus.Infof("[K8s] live read returned resource version %s; proceeding with it", live.ResourceVersion)
+				w.staleReadCount = 0
+				originalSecret = live.DeepCopy()
+				secret = live.DeepCopy()
+			case w.staleReadCount+1 >= maxConsecutiveStaleReads:
+				logrus.Warnf("[K8s] live read still older than last applied after %d attempts; resetting last applied resource version and resyncing", w.staleReadCount+1)
+				w.staleReadCount = 0
+				w.lastAppliedResourceVersion = ""
+				originalSecret = live.DeepCopy()
+				secret = live.DeepCopy()
+			default:
+				w.staleReadCount++
+				core.Secret().EnqueueAfter(w.connInfo.Namespace, w.connInfo.SecretName, probePeriod)
+				return secret, nil
+			}
 		}
 
 		if planData, ok := secret.Data[PlanKey]; ok {
@@ -419,8 +442,8 @@ func (w *watcher) start(ctx context.Context, strictVerify bool) {
 			}
 			secret, err = w.updateSecret(core, secret)
 			if err != nil {
-				logrus.Fatalf("[K8s] encountered an error while attempting to update the secret: %v", err)
-				return nil, nil
+				logrus.Errorf("[K8s] encountered an error while attempting to update the secret: %v", err)
+				return secret, err // requeue with backoff rather than terminating
 			}
 			return secret, nil
 		}
