@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -80,5 +81,10 @@ func (o interlockOwner) isAlive() bool {
 	if o.PID == os.Getpid() {
 		return true
 	}
-	return false
+	p, err := os.FindProcess(o.PID)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+
 }

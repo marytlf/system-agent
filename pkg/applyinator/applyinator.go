@@ -144,7 +144,7 @@ func (a *Applyinator) Apply(ctx context.Context, input ApplyInput) (ApplyOutput,
 		}
 
 		// At this point, there is no restart-pending and we can continue with applyinator reconciliation, so create the applyinator-active file
-		err := os.WriteFile(applyinatorActiveInterlockFilePath, []byte(nowUnixTimeString), 0600)
+		err := os.WriteFile(applyinatorActiveInterlockFilePath, newInterlockOwner(now).marshal(), 0600)
 		if err != nil {
 			logrus.Errorf("unable to write applyinator active interlock file %s: %v", applyinatorActiveInterlockFilePath, err)
 		}
